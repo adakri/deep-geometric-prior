@@ -62,14 +62,11 @@ def plot_reconstruction(uv, x, transform, model, pad=1.0):
     with torch.no_grad():
         n = 128
         translate, scale, rotate = transform
-
         uv_dense = utils.meshgrid_from_lloyd_ts(
             uv.cpu().numpy(), n, scale=pad
         ).astype(np.float32)
-
         uv_dense = torch.from_numpy(uv_dense).to(uv)
         y_dense = model(uv_dense)
-
         x_np = x.squeeze().cpu().numpy()
         mesh_v = y_dense.squeeze().cpu().numpy()
         mesh_f = utils.meshgrid_face_indices(n)

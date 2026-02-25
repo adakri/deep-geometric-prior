@@ -61,7 +61,7 @@ def load_point_cloud_by_file_extension(file_name, compute_normals=False):
     
     if compute_normals and f is None:
         # Estimate point cloud normals
-        n = pcu.estimate_point_cloud_normals_knn(v,16)
+        n = pcu.estimate_point_cloud_normals_knn(v,64)
         
     return v, n
 
