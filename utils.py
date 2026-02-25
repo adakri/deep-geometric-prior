@@ -13,7 +13,7 @@ def meshgrid_face_indices(cols, rows=-1):
     f = np.array([
         np.concatenate([base, base+1]),
         np.concatenate([base + 1, base + cols + 1]),
-        np.concatenate([base + cols, base + cols])], dtype=np.int).T
+        np.concatenate([base + cols, base + cols])], dtype=np.int32).T
 
     # f = np.array([
     #     np.concatenate([base, base+1]),
@@ -25,7 +25,7 @@ def meshgrid_face_indices(cols, rows=-1):
 
 def meshgrid_vertices(w, urange=[0, 1], vrange=[0, 1]):
     g = np.mgrid[urange[0]:urange[1]:complex(w), vrange[0]:vrange[1]:complex(w)]
-    v = np.vstack(map(np.ravel, g)).T
+    v = np.vstack([np.ravel(arr) for arr in g]).T
     return np.ascontiguousarray(v)
 
 
@@ -44,19 +44,25 @@ def meshgrid_from_lloyd_ts(model_ts, n, scale=1.0):
 def load_point_cloud_by_file_extension(file_name, compute_normals=False):
     import point_cloud_utils as pcu
     if file_name.endswith(".obj"):
-        v, f, n = pcu.read_obj(file_name, dtype=np.float32)
+        v, f, n = pcu.load_mesh_vfn(file_name, dtype=np.float32)
     elif file_name.endswith(".off"):
-        v, f, n = pcu.read_off(file_name, dtype=np.float32)
+        v, f, n = pcu.load_mesh_vfn(file_name, dtype=np.float32)
     elif file_name.endswith(".ply"):
-        v, f, n, _ = pcu.read_ply(file_name, dtype=np.float32)
+        v, f, n, _ = pcu.load_mesh_vfnc(file_name, dtype=np.float32)
     elif file_name.endswith(".npts"):
         v, n = load_srb_range_scan(file_name)
         f = []
     else:
         raise ValueError("Invalid file extension must be one of .obj, .off, .ply, or .npts")
 
-    if compute_normals and f.shape[0] > 0:
-        n = pcu.per_vertex_normals(v, f)
+    if compute_normals and f is not None:
+        if f.shape[0] > 0:
+            n = pcu.per_vertex_normals(v, f)
+    
+    if compute_normals and f is None:
+        # Estimate point cloud normals
+        n = pcu.estimate_point_cloud_normals_knn(v,16)
+        
     return v, n
 
 

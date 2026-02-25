@@ -1,2 +1,5 @@
 .idea
 *.pyc
+*.pt
+.vscode/
+.dgp_env/

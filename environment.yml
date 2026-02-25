@@ -83,7 +83,7 @@ dependencies:
   - pyqt=5.6.0=py37h13b7fb3_1008
   - python=3.7.5=h0371630_0
   - python-dateutil=2.8.1=py_0
-  - pytorch=1.1.0=py3.7_cuda9.0.176_cudnn7.5.1_0
+  - pytorch
   - pytz=2019.3=py_0
   - qt=5.6.3=h8bf5577_3
   - readline=7.0=h7b6447c_5
@@ -94,7 +94,7 @@ dependencies:
   - sqlite=3.30.1=h7b6447c_0
   - tbb=2019.9=hc9558a2_0
   - tk=8.6.8=hbc83047_0
-  - torchvision=0.3.0=py37_cu9.0.176_1
+  - torchvision
   - tornado=6.0.3=py37h516909a_0
   - traitlets=4.3.3=py37_0
   - traits=5.2.0=py37h516909a_0
@@ -114,4 +114,3 @@ dependencies:
   - zlib=1.2.11=h7b6447c_3
   - zstd=1.3.7=h0b5b093_0
 prefix: /home/centos/bin/miniconda3/envs/deep-geometric-prior
-
