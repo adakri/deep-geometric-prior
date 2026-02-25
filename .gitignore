@@ -2,4 +2,6 @@
 *.pyc
 *.pt
 .vscode/
-.dgp_env/
+.dgp_venv/
+*.ply
+*.obj
