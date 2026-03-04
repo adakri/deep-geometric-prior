@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 from point_cloud_utils import sample_mesh_poisson_disk
+from scipy.spatial import cKDTree
+import point_cloud_utils as pcu
 import json
 import os
 import random
@@ -121,6 +123,8 @@ def json_to_object(json_file):
     return Args(**json_args)
 
 
+# Sampling and pcds
+
 def random_mesh_samples(v, f, n_samples=10 ** 4):
     """
     Generate `n_samples` point samples on the mesh described by (v, f)
@@ -160,6 +164,22 @@ def random_mesh_samples(v, f, n_samples=10 ** 4):
         np.sqrt(r[:,0:1]) * r[:,1:] * C
     return P, sample_face_idx
 
+def transform_pointcloud(x, device):
+    translate = -np.mean(x, axis=0)
+    scale = np.array(
+        [1.0 / np.max(np.linalg.norm(x + translate, axis=1))], dtype=np.float32
+    )
+    rotate, _, _ = np.linalg.svd((x + translate).T, full_matrices=False)
+    transform = (
+        torch.from_numpy(translate).to(device),
+        torch.from_numpy(scale).to(device),
+        torch.from_numpy(rotate).to(device),
+    )
+    x_tx = torch.from_numpy((scale * (x.astype(np.float32) + translate)) @ rotate).to(
+        device
+    )
+
+    return x_tx, transform
 
 def downsample_point_cloud(point_cloud, normals, target_num_pts, max_iters=4096, max_retries=5):
     """
@@ -221,6 +241,220 @@ def downsample_point_cloud(point_cloud, normals, target_num_pts, max_iters=4096,
     return Pdown, Ndown
 
 
+def compute_patches(x, n, r, c, angle_thresh=95.0,  min_pts_per_patch=10, devices=('cpu',)):
+    """
+    Given an input point cloud, X, compute a set of patches (subsets of X) and parametric samples for those patches.
+    Each patch is a cluster of points which lie in a ball of radius c * r and share a similar normal.
+    The spacing between patches is roughly the radius, r. This function also returns a set of 2D parametric samples
+    for each patch. These samples are used to fit a function from the samples to R^3 which agrees with the patch.
+
+    :param x: A 3D point cloud with |x| points specified as an array of shape (|x|, 3) (each row is a point)
+    :param n: Unit normals for the point cloud, x, of shape (|x|, 3) (each row is a unit normal)
+    :param r: The approximate separation between patches
+    :param c: Each patch will fit inside a ball of radius c * r
+    :param angle_thresh: If the normal of a point in a patch differs by greater than angle_thresh degrees from the
+                        normal of the point at the center of the patch, it is discarded.
+    :param min_pts_per_patch: The minimum number of points allowed in a patch
+    :param devices: A list of devices on which to store each patch. Patch i is stored on devices[i % len(devices)].
+    :return: Two lists, idx and uv, of torch tensors, where uv[i] are the parametric samples (shape = (np, 2)) for
+             the i^th patch, and idx[i] are the indexes into x of the points for the i^th patch. i.e. x[idx[i]] are the
+             3D points of the i^th patch.
+    """
+
+    covered = np.zeros(x.shape[0], dtype=np.bool)
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    
+    # https://github.com/fwilliams/point-cloud-utils/releases/tag/0.17.1
+    idx = pcu.downsample_point_cloud_poisson_disk(x, r)
+    ctr_v, ctr_n = x[idx], n[idx]
+    
+    if len(ctr_v.shape) == 1:
+        ctr_v = ctr_v.reshape([1, *ctr_v.shape])
+        ctr_n = ctr_n.reshape([1, *ctr_n.shape])
+    kdtree = cKDTree(x)
+    ball_radius = c * r
+    angle_thresh = np.cos(np.deg2rad(angle_thresh))
+
+    patch_indexes = []
+    patch_uvs = []
+    patch_xs = []
+    patch_transformations = []
+
+    def make_patch(v_ctr, n_ctr):
+        idx_i = np.array(kdtree.query_ball_point(v_ctr, ball_radius, p=np.inf))
+        good_normals = np.squeeze(n[idx_i] @ n_ctr.reshape([3, 1]) > angle_thresh)
+        idx_i = idx_i[good_normals]
+
+        if len(idx_i) < min_pts_per_patch:
+            print("Rejecting small patch with %d points" % len(idx_i))
+            return
+
+        covered_indices = idx_i[np.linalg.norm(x[idx_i] - v_ctr, axis=1) < r]
+        covered[covered_indices] = True
+
+        uv_i = pcu.lloyd_2d(len(idx_i)).astype(np.float32)
+        x_i = x[idx_i].astype(np.float32)
+        translate_i = -np.mean(x_i, axis=0)
+
+        device = devices[len(patch_xs) % len(devices)]
+                
+        scale_i = np.array([1.0 / np.max(np.linalg.norm(x_i + translate_i, axis=1))], dtype=np.float32)
+        rotate_i, _, _ = np.linalg.svd((x_i + translate_i).T, full_matrices=False)
+        transform_i = (torch.from_numpy(translate_i).to(device),
+                       torch.from_numpy(scale_i).to(device),
+                       torch.from_numpy(rotate_i).to(device))
+
+        x_i = torch.from_numpy((scale_i * (x_i.astype(np.float32) + translate_i)) @ rotate_i).to(device)
+
+        patch_transformations.append(transform_i)
+        patch_indexes.append(torch.from_numpy(idx_i))
+        patch_uvs.append(torch.tensor(uv_i, device=device, requires_grad=True))
+        patch_xs.append(x_i)
+        print("Computed patch with %d points" % x_i.shape[0])
+        
+    for i in range(ctr_v.shape[0]):
+        make_patch(ctr_v[i], ctr_n[i])
+
+    for i in range(x.shape[0]):
+        if np.sum(covered) == x.shape[0]:
+            break
+        if not covered[i]:
+            make_patch(x[i], n[i])
+
+    # assert np.sum(covered) == x.shape[0], "There should always be one at least one patch per input vertex"
+
+    print("Found %d neighborhoods" % len(patch_indexes))
+    return patch_indexes, patch_uvs, patch_xs, patch_transformations
+
+
+def patch_means(patch_pis, patch_uvs, patch_idx, patch_tx, phi, x, devices, num_batches):
+    """
+    Given a set of charts and pointwise correspondences between charts, compute the mean of the overlapping points in
+    each chart. This is used to denoise the Atlas after each chart has beeen individually fitted.
+    The charts may not agree exactly on their prediction, so we compute the mean predictions of overlapping charts
+    and fit each chart to that mean.
+
+    :param patch_pis: A list of correspondences between the 2D uv samples and the points in a neighborhood
+    :param patch_uvs: A list of tensors, each of shape [n_i, 2] of UV positions for the given patch
+    :param patch_idx: A list of tensors each of shape [n_i] containing the indices of the points in a neighborhood into
+                      the input point-cloud x (of shape [n, 3])
+    :param patch_tx: A list of tuples (t_i, s_i, r_i) of transformations (t_i is a translation, s_i is a scaling, and
+                     r_i is a rotation matrix) which map the points in a neighborhood to a centered and whitened point
+                     set
+    :param phi: A list of neural networks representing the lifting function for each chart in the atlas
+    :param x: A [n, 3] tensor containing the input point cloud
+    :param devices: A list of devices which the models, phi, will be run on
+    :param num_batches: The number of batches on which to perform the evaluation on
+    :return: A list of tensors, each of shape [n_i, 3] where each tensor is the average prediction of the overlapping
+             charts a the samples
+    """
+    num_patches = len(patch_uvs)
+    batch_size = int(np.ceil(num_patches / num_batches))
+
+    if isinstance(x, np.ndarray):
+        mean_pts = torch.from_numpy(x).to(patch_uvs[0])
+    elif torch.is_tensor(x):
+        mean_pts = x.clone()
+    else:
+        raise ValueError("Invalid type for x")
+
+    counts = torch.ones(x.shape[0], 1).to(mean_pts)
+
+    for b in range(num_batches):
+        start_idx = b * batch_size
+        end_idx = min((b + 1) * batch_size, num_patches)
+        for i in range(start_idx, end_idx):
+            dev_i = devices[i % len(devices)]
+            phi[i] = phi[i].to(dev_i)
+            patch_uvs[i] = patch_uvs[i].to(dev_i)
+            patch_pis[i] = patch_pis[i].to(dev_i)
+            patch_idx[i] = patch_idx[i].to(dev_i)
+            patch_tx[i] = tuple(txj.to(dev_i) for txj in patch_tx[i])
+                
+        for i in range(start_idx, end_idx):
+            translate_i, scale_i, rotate_i = patch_tx[i]
+
+            uv_i = patch_uvs[i]
+            y_i = ((phi[i](uv_i).squeeze() @ rotate_i.transpose(0, 1)) / scale_i - translate_i)
+            pi_i = patch_pis[i]
+            idx_i = patch_idx[i][pi_i]
+        
+            mean_pts[idx_i] += y_i.to(mean_pts)
+            counts[idx_i, :] += 1
+            
+        for i in range(start_idx, end_idx):
+            dev_i = 'cpu'
+            phi[i] = phi[i].to(dev_i)
+            patch_uvs[i] = patch_uvs[i].to(dev_i)
+            patch_pis[i] = patch_pis[i].to(dev_i)
+            patch_idx[i] = patch_idx[i].to(dev_i)
+            patch_tx[i] = tuple(txj.to(dev_i) for txj in patch_tx[i])
+
+    mean_pts = mean_pts / counts
+
+    means = []
+    for i in range(num_patches):
+        idx_i = patch_idx[i]
+        translate_i, scale_i, rotate_i = patch_tx[i]
+        device_i = translate_i.device
+        m_i = scale_i * (mean_pts[idx_i].to(device_i) + translate_i) @ rotate_i
+        means.append(m_i)
+
+    return means
+
+def upsample_surface(patch_uvs, patch_tx, patch_models, devices, scale=1.0, num_samples=8, normal_samples=64,
+                     num_batches=1, compute_normals=True):
+    vertices = []
+    normals = []
+    num_patches = len(patch_models)
+    batch_size = int(np.ceil(num_patches / num_batches))
+    with torch.no_grad():
+        for b in range(num_batches):
+            start_idx = b * batch_size
+            end_idx = min((b + 1) * batch_size, num_patches)
+            for i in range(start_idx, end_idx):
+                dev_i = devices[i % len(devices)]
+                patch_models[i] = patch_models[i].to(dev_i)
+                patch_uvs[i] = patch_uvs[i].to(dev_i)
+                patch_tx[i] = tuple(txj.to(dev_i) for txj in patch_tx[i])
+                
+            for i in range(start_idx, end_idx):
+                if (i + 1) % 10 == 0:
+                    print("Upsamling %d/%d" % (i + 1, len(patch_models)))
+
+                device = devices[i % len(devices)]
+
+                n = num_samples
+                translate_i, scale_i, rotate_i = (patch_tx[i][j].to(device) for j in range(len(patch_tx[i])))
+                uv_i = meshgrid_from_lloyd_ts(patch_uvs[i].cpu().numpy(), n, scale=scale).astype(np.float32)
+                uv_i = torch.from_numpy(uv_i).to(patch_uvs[i])
+                y_i = patch_models[i](uv_i)
+
+                mesh_v = ((y_i.squeeze() @ rotate_i.transpose(0, 1)) / scale_i - translate_i).cpu().numpy()
+            
+                if compute_normals:
+                    mesh_f = meshgrid_face_indices(n)
+                    mesh_n = pcu.per_vertex_normals(mesh_v, mesh_f)
+                    normals.append(mesh_n)
+
+                vertices.append(mesh_v)
+            for i in range(start_idx, end_idx):
+                dev_i = 'cpu'
+                patch_models[i] = patch_models[i].to(dev_i)
+                patch_uvs[i] = patch_uvs[i].to(dev_i)
+                patch_tx[i] = tuple(txj.to(dev_i) for txj in patch_tx[i])
+
+    vertices = np.concatenate(vertices, axis=0).astype(np.float32)
+    if compute_normals:
+        normals = np.concatenate(normals, axis=0).astype(np.float32)
+    else:
+        print("Fixing normals...")
+        normals = pcu.estimate_point_cloud_normals_knn(vertices, normal_samples)
+
+    return vertices, normals
+
+
+# Geometry measures
 def surface_area(v, f):
     """
     Compute the surface area of the batch of triangle meshes defined by v and f
@@ -285,7 +519,7 @@ def normals_curve_2d(x):
     n = n / torch.norm(n, dim=2).view(b, n_x, 1)
     return n
 
-
+# Misc
 def isnan(x):
     """
     Returns True if the tensor x contains NaNs
