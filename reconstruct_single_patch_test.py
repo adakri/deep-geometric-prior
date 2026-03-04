@@ -7,142 +7,12 @@ import torch.nn as nn
 import numpy as np
 import point_cloud_utils as pcu
 
-import utils
+import src.utils as utils
+from src.viz import plot_reconstruction, plot_correspondences, plot_uv
+from src.nns import MLP
 from fml.nn import SinkhornLoss, pairwise_distances
 import ot
 
-
-class MLP(nn.Module):
-    """
-    A simple fully connected network mapping vectors in dimension in_dim to vectors in dimension out_dim
-    """
-
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.fc1 = nn.Linear(in_dim, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 512)
-        self.fc4 = nn.Linear(512, 512)
-        self.fc5 = nn.Linear(512, out_dim, bias=False)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
-        x = self.relu(self.fc4(x))
-        x = self.fc5(x)
-        return x
-
-
-def transform_pointcloud(x, device):
-    translate = -np.mean(x, axis=0)
-    scale = np.array(
-        [1.0 / np.max(np.linalg.norm(x + translate, axis=1))], dtype=np.float32
-    )
-    rotate, _, _ = np.linalg.svd((x + translate).T, full_matrices=False)
-    transform = (
-        torch.from_numpy(translate).to(device),
-        torch.from_numpy(scale).to(device),
-        torch.from_numpy(rotate).to(device),
-    )
-    x_tx = torch.from_numpy((scale * (x.astype(np.float32) + translate)) @ rotate).to(
-        device
-    )
-
-    return x_tx, transform
-
-def plot_reconstruction(uv, x, transform, model, pad=1.0):
-    import torch
-    import numpy as np
-    import open3d as o3d
-
-    with torch.no_grad():
-        n = 128
-        translate, scale, rotate = transform
-        uv_dense = utils.meshgrid_from_lloyd_ts(
-            uv.cpu().numpy(), n, scale=pad
-        ).astype(np.float32)
-        uv_dense = torch.from_numpy(uv_dense).to(uv)
-        y_dense = model(uv_dense)
-        x_np = x.squeeze().cpu().numpy()
-        mesh_v = y_dense.squeeze().cpu().numpy()
-        mesh_f = utils.meshgrid_face_indices(n)
-
-    # ---- Point cloud (input x) ----
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(x_np)
-    pcd.paint_uniform_color([0.8, 0.2, 0.2])
-
-    # ---- Reconstructed mesh ----
-    mesh = o3d.geometry.TriangleMesh()
-    mesh.vertices = o3d.utility.Vector3dVector(mesh_v)
-    # Duplicate inverse triangles (open3d back face culling)
-    triangles = mesh_f.astype(np.int32)
-    triangles_flipped = triangles[:, [0, 2, 1]]  
-    all_triangles = np.vstack([triangles, triangles_flipped])
-
-    mesh.triangles = o3d.utility.Vector3iVector(all_triangles)
-    #mesh.triangles = o3d.utility.Vector3iVector(mesh_f.astype(np.int32))
-    mesh.compute_vertex_normals()
-    mesh.paint_uniform_color([0.2, 0.2, 0.8])
-
-    o3d.visualization.draw_geometries([pcd, mesh])
-
-def plot_correspondences(model, uv, x, pi):
-    import torch
-    import numpy as np
-    import open3d as o3d
-
-    with torch.no_grad():
-        y = model(uv).detach().squeeze().cpu().numpy()
-        x_np = x.detach().squeeze().cpu().numpy()
-        x_corr = x[pi].detach().squeeze().cpu().numpy()
-
-    # ---- Source points (red) ----
-    pcd_x = o3d.geometry.PointCloud()
-    pcd_x.points = o3d.utility.Vector3dVector(x_np)
-    pcd_x.paint_uniform_color([1.0, 0.0, 0.0])
-
-    # ---- Target points (green) ----
-    pcd_y = o3d.geometry.PointCloud()
-    pcd_y.points = o3d.utility.Vector3dVector(y)
-    pcd_y.paint_uniform_color([0.0, 1.0, 0.0])
-
-    # ---- Correspondence lines ----
-    points = []
-    lines = []
-
-    for i in range(x_corr.shape[0]):
-        points.append(x_corr[i])
-        points.append(y[i])
-        lines.append([2 * i, 2 * i + 1])
-
-    line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(np.array(points))
-    line_set.lines = o3d.utility.Vector2iVector(np.array(lines))
-    line_set.paint_uniform_color([0.1, 0.1, 0.1])
-
-    o3d.visualization.draw_geometries([pcd_x, pcd_y, line_set])
-
-def plot_uv(uv):
-    import matplotlib.pyplot as plt
-    # Plot
-    plt.figure()
-    plt.scatter(uv[:, 0], uv[:, 1], s=10)
-
-    # Regular grid appearance
-    plt.gca().set_aspect('equal', adjustable='box')
-    plt.xlim(0, 1)
-    plt.ylim(0, 1)
-    plt.grid(True)
-
-    plt.xlabel("U")
-    plt.ylabel("V")
-    plt.title("UV Positions on Regular Grid")
-    plt.show()
 
 
 def main():
@@ -153,7 +23,7 @@ def main():
     argparser.add_argument("--global-epochs", "-ng", type=int, default=128, help="Number of global fitting iterations")
     argparser.add_argument("--learning-rate", "-lr", type=float, default=1e-3, help="Step size for gradient descent")
     argparser.add_argument("--device", "-d", type=str, default="cuda", help="The device to use when fitting (either 'cpu' or 'cuda')")
-    argparser.add_argument("--exact-emd", "-e", action="store_true", help="Use exact optimal transport distance instead of sinkhorn")
+    argparser.add_argument( "--loss", type=str, default="sinkhorn", choices=["sinkhorn", "emd", "chamfer", "hausdorff"], help="Loss function to use")
     argparser.add_argument("--max-sinkhorn-iters", "-si", type=int, default=32, help="Maximum number of Sinkhorn iterations")
     argparser.add_argument("--sinkhorn-epsilon", "-sl", type=float, default=1e-3, help="The reciprocal (1/lambda) of the \
                            sinkhorn regularization parameter.")
@@ -170,7 +40,7 @@ def main():
         "uv": None,
         "x": None,
         "transform": None,
-        "exact_emd": args.exact_emd,
+        "loss": args.loss,
         "global_epochs": args.global_epochs,
         "local_epochs": args.local_epochs,
         "learning_rate": args.learning_rate,
@@ -185,13 +55,15 @@ def main():
         args.mesh_filename, compute_normals=True
     )
     n = n[0]
-    # Optionally, we downsample
-    idx = pcu.downsample_point_cloud_poisson_disk(x, 0.03)
-    x = x[idx]
-    n = n[idx]
+    if(True):
+        # Optionally, we downsample
+        # https://github.com/fwilliams/point-cloud-utils/releases/tag/0.17.1
+        idx = pcu.downsample_point_cloud_poisson_disk(x, 0.03)
+        x = x[idx]
+        n = n[idx]
 
     # Center the point cloud about its mean and align about its principle components
-    x, transform = transform_pointcloud(x, args.device)
+    x, transform = utils.transform_pointcloud(x, args.device)
 
     # Generate an initial set of UV samples in the plane
     uv = torch.tensor(
@@ -201,9 +73,7 @@ def main():
     )
 
     # Initialize the model for the surface
-    # phi = mlp_ultra_shallow(2, 3, hidden=8192).to(args.device)
     phi = MLP(2, 3).to(args.device)
-    # phi = MLPWideAndDeep(2, 3).to(args.device)
 
     output_dict["uv"] = uv
     output_dict["x"] = x
@@ -234,7 +104,7 @@ def main():
         y = phi(uv)
 
         with torch.no_grad():
-            if args.exact_emd:
+            if args.loss == "exact_emd":
                 M = (
                     pairwise_distances(x.unsqueeze(0), y.unsqueeze(0))
                     .squeeze()
@@ -244,6 +114,11 @@ def main():
                 )
                 p = ot.emd(np.ones(x.shape[0]), np.ones(x.shape[0]), M)
                 p = torch.from_numpy(p.astype(np.float32)).to(args.device)
+            elif args.loss == "chamfer":
+                print()
+            elif args.loss == "hausdorff":
+                # https://github.com/Project-MONAI/MONAI/blob/dev/monai/metrics/hausdorff_distance.py
+                print()
             else:
                 _, p = sinkhorn_loss(x.unsqueeze(0), y.unsqueeze(0))
             pi = p.squeeze().max(0)[1]
@@ -280,7 +155,7 @@ def main():
     torch.save(output_dict, args.output)
 
     if args.plot:
-        plot_uv(uv.detach().cpu().numpy())
+        #plot_uv(uv.detach().cpu().numpy())
         plot_reconstruction(uv, x, transform, phi, pad=1.0)
         plot_correspondences(phi, uv, x, pi)
 
