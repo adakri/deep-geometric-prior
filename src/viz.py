@@ -1,48 +1,102 @@
 import src.utils as utils
+import matplotlib.pyplot as plt
+import torch
+import numpy as np
+import open3d as o3d
+
 
 # Mono
+def plot_mesh_wscalarf(v,f,scalar_field_np):
+    assert v.shape[0] == scalar_field_np.shape[0]
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(v)
+    mesh.triangles = o3d.utility.Vector3iVector(f)
+    mesh.compute_vertex_normals()
+    scalar_field_normalized = (scalar_field_np - scalar_field_np.min()) / (scalar_field_np.max() - scalar_field_np.min())
+    cmap = plt.get_cmap('jet')
+    colors = cmap(scalar_field_normalized)[:, :3]  # Get RGB values from colormap
+    print(f"Scalar field range: {scalar_field_np.min()} to {scalar_field_np.max()}")
+    mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+    
+    # Options
+    mesh_show_back_face = True
+    mesh_show_wireframe = True
+    o3d.visualization.draw_geometries([mesh], 
+                                      mesh_show_back_face=mesh_show_back_face,
+                                      mesh_show_wireframe=mesh_show_wireframe)
 
-def plot_reconstruction(uv, x, transform, model, pad=1.0):
-    import torch
-    import numpy as np
-    import open3d as o3d
 
+def plot_reconstruction(uv, model, x=None, transform=None, pad=1.0, scalar_field_func: callable=None, n: int=128):
+    # If n is provided, upsample the uv grid to an n by n grid for visualization. 
+    # Otherwise, use the original uv grid (if the scalar field is evaluated seperately for example).
     with torch.no_grad():
-        n = 128
-        translate, scale, rotate = transform
         uv_dense = utils.meshgrid_from_lloyd_ts(
             uv.cpu().numpy(), n, scale=pad
         ).astype(np.float32)
         uv_dense = torch.from_numpy(uv_dense).to(uv)
-        y_dense = model(uv_dense)
-        x_np = x.squeeze().cpu().numpy()
-        mesh_v = y_dense.squeeze().cpu().numpy()
         mesh_f = utils.meshgrid_face_indices(n)
+        y_dense = model(uv_dense)
+        mesh_v = y_dense.squeeze().cpu().numpy()
+        
+    if(scalar_field_func is not None):
+        scalar_field = scalar_field_func(model, uv_dense)
+        scalar_field = scalar_field.detach().cpu().numpy()
+        
+        # Debug
+        import igl
+        o = igl.principal_curvature(mesh_v, mesh_f)
+        v1, v2, k1, k2 = o[0], o[1], o[2], o[3]
+        scalar_field = k1*k2
+    else:
+        scalar_field = None
 
-    # ---- Point cloud (input x) ----
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(x_np)
-    pcd.paint_uniform_color([0.8, 0.2, 0.2])
+    if(x is not None):
+        # ---- Point cloud (input x) ----
+        with torch.no_grad():
+            x_np = x.squeeze().cpu().numpy()
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(x_np)
+        pcd.paint_uniform_color([0.8, 0.2, 0.2])
 
     # ---- Reconstructed mesh ----
     mesh = o3d.geometry.TriangleMesh()
     mesh.vertices = o3d.utility.Vector3dVector(mesh_v)
     # Duplicate inverse triangles (open3d back face culling)
-    triangles = mesh_f.astype(np.int32)
-    triangles_flipped = triangles[:, [0, 2, 1]]  
-    all_triangles = np.vstack([triangles, triangles_flipped])
-
-    mesh.triangles = o3d.utility.Vector3iVector(all_triangles)
-    #mesh.triangles = o3d.utility.Vector3iVector(mesh_f.astype(np.int32))
+    #triangles = mesh_f.astype(np.int32)
+    #triangles_flipped = triangles[:, [0, 2, 1]]  
+    #all_triangles = np.vstack([triangles, triangles_flipped])
+    #mesh.triangles = o3d.utility.Vector3iVector(all_triangles)
+    
+    mesh.triangles = o3d.utility.Vector3iVector(mesh_f.astype(np.int32))
     mesh.compute_vertex_normals()
-    mesh.paint_uniform_color([0.2, 0.2, 0.8])
+    
+    if(scalar_field is not None):
+        # Map scalar field to colors
+        if(torch.is_tensor(scalar_field)):
+            scalar_field_np = scalar_field.detach().squeeze().cpu().numpy()
+        else:
+            scalar_field_np = scalar_field
+        scalar_field_normalized = (scalar_field_np - scalar_field_np.min()) / (scalar_field_np.max() - scalar_field_np.min())
+        cmap = plt.get_cmap('jet')
+        colors = cmap(scalar_field_normalized)[:, :3]  # Get RGB values from colormap
+        print(f"Scalar field range: {scalar_field_np.min()} to {scalar_field_np.max()}")
+        mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+        
+        assert len(mesh.vertices) == colors.shape[0]
+    else:
+        mesh.paint_uniform_color([0.2, 0.2, 0.8])
 
-    o3d.visualization.draw_geometries([pcd, mesh])
+    # Options
+    mesh_show_back_face = True
+    mesh_show_wireframe = True
+
+    if(x is not None):
+        o3d.visualization.draw_geometries([mesh, pcd], mesh_show_back_face=mesh_show_back_face,mesh_show_wireframe=mesh_show_wireframe)
+    else:
+        o3d.visualization.draw_geometries([mesh], mesh_show_back_face=mesh_show_back_face,mesh_show_wireframe=mesh_show_wireframe)
+
 
 def plot_correspondences(model, uv, x, pi):
-    import torch
-    import numpy as np
-    import open3d as o3d
 
     with torch.no_grad():
         y = model(uv).detach().squeeze().cpu().numpy()
@@ -76,7 +130,6 @@ def plot_correspondences(model, uv, x, pi):
     o3d.visualization.draw_geometries([pcd_x, pcd_y, line_set])
 
 def plot_uv(uv):
-    import matplotlib.pyplot as plt
     # Plot
     plt.figure()
     plt.scatter(uv[:, 0], uv[:, 1], s=10)
@@ -108,9 +161,6 @@ def plot_batch_reconstruction(x, patch_uvs, patch_tx, patch_models, scale=1.0):
     :return: A list of tensors, each of shape [n_i, 3] where each tensor is the average prediction of the overlapping
              charts a the samples
     """
-    import torch
-    import numpy as np
-    import open3d as o3d
     import colorsys
 
     with torch.no_grad():
@@ -161,9 +211,7 @@ def plot_batch_patches(x, patch_idx):
     :param x: A [n, 3] tensor containing the input point cloud
     :param patch_idx: List of [n_i]-shaped tensors each indexing into x representing the points in a given neighborhood.
     """
-    import numpy as np
     import colorsys
-    import open3d as o3d
     
     pcd_list = []
     for i,idx_i in enumerate(patch_idx):

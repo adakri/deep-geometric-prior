@@ -201,8 +201,8 @@ def main():
     torch.save(output_dict, args.output)
 
     if args.plot:
-        plot_reconstruction(uv, x, transform, phi, pad=1.0)
-        plot_correspondences(phi, uv, x, pi)
+        plot_reconstruction(uv=uv, x=x, transform=transform, model=phi, pad=1.0, n=128)
+        plot_correspondences(model=phi, uv=uv, x=x, pi=pi)
 
 
 if __name__ == "__main__":

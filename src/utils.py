@@ -240,7 +240,6 @@ def downsample_point_cloud(point_cloud, normals, target_num_pts, max_iters=4096,
 
     return Pdown, Ndown
 
-
 def compute_patches(x, n, r, c, angle_thresh=95.0,  min_pts_per_patch=10, devices=('cpu',)):
     """
     Given an input point cloud, X, compute a set of patches (subsets of X) and parametric samples for those patches.
@@ -325,7 +324,6 @@ def compute_patches(x, n, r, c, angle_thresh=95.0,  min_pts_per_patch=10, device
 
     print("Found %d neighborhoods" % len(patch_indexes))
     return patch_indexes, patch_uvs, patch_xs, patch_transformations
-
 
 def patch_means(patch_pis, patch_uvs, patch_idx, patch_tx, phi, x, devices, num_batches):
     """
@@ -453,71 +451,6 @@ def upsample_surface(patch_uvs, patch_tx, patch_models, devices, scale=1.0, num_
 
     return vertices, normals
 
-
-# Geometry measures
-def surface_area(v, f):
-    """
-    Compute the surface area of the batch of triangle meshes defined by v and f
-    :param v: A [b, nv, 3] tensor where each [i, :, :] are the vertices of a mesh
-    :param f: A [b, nf, 3] tensor where each [i, :, :] are the triangle indices into v[i, :, :] of the mesh
-    :return: A tensor of shape [b, 1] with the surface area of each mesh
-    """
-    idx = torch.arange(v.shape[0])
-    tris = v[:, f, :][idx, idx, :, :]
-    a = tris[:, :, 1, :] - tris[:, :, 0, :]
-    b = tris[:, :, 2, :] - tris[:, :, 0, :]
-    areas = torch.sum(torch.norm(torch.cross(a, b, dim=2), dim=2)/2.0, dim=1)
-    return areas
-
-
-def arclength(x):
-    """
-    Compute the arclength of a curve sampled at a sequence of points.
-    :param x: A [b, n, d] tensor of minibaches of d-dimensional point sequences.
-    :return: A tensor of shape [b] where each entry, i, is estimated arclength for the curve samples x[i, :, :]
-    """
-    v = x[:, 1:, :] - x[:, :-1, :]
-    return torch.norm(v, dim=2).sum(1)
-
-
-def curvature_2d(x):
-    """
-    Compute the discrete curvature for a sequence of points on a curve lying in a 2D embedding space
-    :param x: A [b, n, 2] tensor where each [i, :, :] is a sequence of n points lying along some curve
-    :return: A [b, n-2] tensor where each [i, j] is the curvature at the point x[i, j+1, :]
-    """
-    # x has shape [b, n, d]
-    b = x.shape[0]
-    n_x = x.shape[1]
-    n_v = n_x - 2
-
-    v = x[:, 1:, :] - x[:, :-1, :]                         # v_i = x_{i+1} - x_i
-    v_norm = torch.norm(v, dim=2)
-    v = v / v_norm.view(b, n_x-1, 1)                       # v_i = v_i / ||v_i||
-    v1 = v[:, :-1, :].contiguous().view(b * n_v, 1, 2)
-    v2 = v[:, 1:, :].contiguous().view(b * n_v, 1, 2)
-    c_c = torch.bmm(v1, v2.transpose(1, 2)).view(b, n_v)   # \theta_i = <v_i, v_i+1>
-    return torch.acos(torch.clamp(c_c, min=-1.0, max=1.0)) / v_norm[:, 1:]
-
-
-def normals_curve_2d(x):
-    """
-    Compute approximated normals for a sequence of point samples along a curve in 2D.
-    :param x: A tensor of shape [b, n, 2] where each x[i, :, :] is a sequence of n 2d point samples on a curve
-    :return: A tensor of shape [b, n, 2] where each [i, j, :] is the estimated normal for point x[i, j, :]
-    """
-    b = x.shape[0]
-    n_x = x.shape[1]
-
-    n = torch.zeros(x.shape)
-    n[:, :-1, :] = x[:, 1:, :] - x[:, :-1, :]
-    n[:, -1, :] = (x[:, -1, :] - x[:, -2, :])
-    n = n[:, :, [1, 0]]
-    n[:, :, 0] = -n[:, :, 0]
-    n = n / torch.norm(n, dim=2).view(b, n_x, 1)
-    n[:, 1:, :] = 0.5*(n[:, 1:, :] + n[:, :-1, :])
-    n = n / torch.norm(n, dim=2).view(b, n_x, 1)
-    return n
 
 # Misc
 def isnan(x):

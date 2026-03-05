@@ -8,6 +8,7 @@ import numpy as np
 import point_cloud_utils as pcu
 
 import src.utils as utils
+import src.geom as geom
 from src.viz import plot_reconstruction, plot_correspondences, plot_uv
 from src.nns import MLP
 from fml.nn import SinkhornLoss, pairwise_distances
@@ -74,6 +75,7 @@ def main():
 
     # Initialize the model for the surface
     phi = MLP(2, 3).to(args.device)
+    # TODO: add new archis
 
     output_dict["uv"] = uv
     output_dict["x"] = x
@@ -102,7 +104,8 @@ def main():
         epoch_start_time = time.time()
 
         y = phi(uv)
-
+        
+        # TODO: add losses from py3d
         with torch.no_grad():
             if args.loss == "exact_emd":
                 M = (
@@ -124,6 +127,9 @@ def main():
             pi = p.squeeze().max(0)[1]
 
         loss = mse_loss(x[pi].unsqueeze(0), y.unsqueeze(0))
+        
+        # Add regularization
+        # TODO
 
         loss.backward()
 
@@ -156,9 +162,12 @@ def main():
 
     if args.plot:
         #plot_uv(uv.detach().cpu().numpy())
-        plot_reconstruction(uv, x, transform, phi, pad=1.0)
-        plot_correspondences(phi, uv, x, pi)
-
+        plot_reconstruction(uv=uv, x=x, transform=transform, model=phi, pad=1.0, n=128)
+        plot_correspondences(model=phi, uv=uv, x=x, pi=pi)
+        
+    # Evaluate Gaussian curvature
+    plot_reconstruction(uv=uv, x=None, transform=None, model=phi, pad=1.0, scalar_field_func=geom.gaussian_curvature_fundamental)
+    plot_reconstruction(uv=uv, x=None, transform=None, model=phi, pad=1.0, scalar_field_func=geom.gaussian_curvature_det)
 
 if __name__ == "__main__":
     main()
