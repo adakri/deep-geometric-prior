@@ -4,7 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from reconstruct_surface import MLP, upsample_surface
+import src.utils as utils
+from .reconstruct_surface_test import MLP
 import point_cloud_utils as pcu
 
 
@@ -53,7 +54,7 @@ def main():
         scale = args.scale
 
     print("Generating upsamples...")
-    v, n = upsample_surface(state["patch_uvs"], state["patch_txs"], model, devices,
+    v, n = utils.upsample_surface(state["patch_uvs"], state["patch_txs"], model, devices,
                             scale=scale, num_samples=args.upsamples_per_patch,
                             normal_samples=args.normal_neighborhood_size, compute_normals=False)
 
