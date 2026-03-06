@@ -5,3 +5,4 @@
 .dgp_venv/
 *.ply
 *.obj
+configs/run_*.yaml
