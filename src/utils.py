@@ -3,6 +3,7 @@ import torch
 from point_cloud_utils import sample_mesh_poisson_disk
 from scipy.spatial import cKDTree
 import point_cloud_utils as pcu
+from omegaconf import OmegaConf
 import json
 import os
 import random
@@ -461,7 +462,6 @@ def isnan(x):
     """
     return bool(torch.max(torch.isnan(x)) > 0)
 
-
 def seed_everything(seed):
     """
     Seed all the RNGs that are used by the programs in this repository
@@ -476,7 +476,6 @@ def seed_everything(seed):
     random.seed(seed)
 
     return seed
-
 
 class ValueOrRandomRange(object):
     """
@@ -527,3 +526,18 @@ class ValueOrRandomRange(object):
     @property
     def value_or_range(self):
         return self._val
+
+# Config
+def get_config():
+    cfg = OmegaConf.load("configs/default.yaml")
+    cli_cfg = OmegaConf.from_cli()
+    cfg = OmegaConf.merge(cfg, cli_cfg)
+    # Save
+    OmegaConf.save(cfg, "configs/run_config.yaml")
+
+    return cfg
+
+def get_output_config(cfg, output_dict):
+    output_dict = OmegaConf.merge(cfg, output_dict)
+    output_dict = OmegaConf.to_container(output_dict, resolve=True)
+    return output_dict

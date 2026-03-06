@@ -1,0 +1,35 @@
+# Default configuration file 
+mesh_filename: null
+
+plot: false
+
+optimization:
+  local_epochs: 128
+  global_epochs: 128
+  learning_rate: 1e-3
+  print_every: 16
+  use_best: false
+
+device: cuda
+seed: -1
+
+loss:
+  chamfer:
+    weight: 1.0
+  exact_emd:
+    weight: 0.0
+  sinkhorn:
+    weight: 0.0
+    max_sinkhorn_iters: 32
+    sinkhorn_epsilon: 1e-3
+  # regularization losses
+  isometry:
+    weight: 0.0
+  anisotropy:
+    weight: 0.0
+  isotropic_scaling:
+    weight: 0.0
+  gaussian_k:
+    weight: 0.0
+
+output: out.pt

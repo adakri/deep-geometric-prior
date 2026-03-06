@@ -1,4 +1,4 @@
-# https://github.com/nv-tlabs/NKSR/blob/public/metrics.py
+# Modified from https://github.com/nv-tlabs/NKSR/blob/public/metrics.py
 # Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
 # NVIDIA CORPORATION & AFFILIATES and its licensors retain all intellectual property
@@ -10,11 +10,20 @@
 import numpy as np
 import torch
 import open3d as o3d
+import point_cloud_utils as pcu
 from pycg import vis, exp
 from pykdtree.kdtree import KDTree
 
 
 NAN_METRIC = float('nan')
+ESSENTIAL_METRICS = [
+    'chamfer-L1', 'f-score', 'normals'
+]
+ALL_METRICS = [
+    'completeness', 'accuracy', 'normals completeness', 'normals accuracy', 'normals',
+    'completeness2', 'accuracy2', 'chamfer-L2',
+    'chamfer-L1', 'f-precision', 'f-recall', 'f-score', 'f-score-15', 'f-score-20'
+]
 
 
 def distance_p2p(points_src, normals_src, points_tgt, normals_tgt):
@@ -44,19 +53,8 @@ def get_threshold_percentage(dist, thresholds):
     return in_threshold
 
 
-class MeshEvaluator:
-
-    ESSENTIAL_METRICS = [
-        'chamfer-L1', 'f-score', 'normals'
-    ]
-    ALL_METRICS = [
-        'completeness', 'accuracy', 'normals completeness', 'normals accuracy', 'normals',
-        'completeness2', 'accuracy2', 'chamfer-L2',
-        'chamfer-L1', 'f-precision', 'f-recall', 'f-score', 'f-score-15', 'f-score-20'
-    ]
-
-    """
-    Mesh evaluation class that handles the mesh evaluation process. Returned dict has meaning:
+class PointCloudEvaluator:
+    """Evaluator for point cloud metrics. Returned dict has meaning:
         - completeness:             mean distance from all gt to pd.
         - accuracy:                 mean distance from all pd to gt.
         - chamfer-l1/l2:            average of the above two. [Chamfer distance]
@@ -67,18 +65,18 @@ class MeshEvaluator:
     Args:
         n_points (int): number of points to be used for evaluation
     """
-
-    def __init__(self, n_points=100000, metric_names=ALL_METRICS):
-        self.n_points = n_points
+    
+    def __init__(self, metric_names=ALL_METRICS):
         self.thresholds = np.array([0.01, 0.015, 0.02, 0.002, 0.1])
         self.fidx = [0, 1, 2, 3, 4]
         self.metric_names = metric_names
 
-    def eval_mesh(self, mesh, pointcloud_tgt, normals_tgt, onet_samples=None):
+    def eval_pcd(self, pointcloud_src, pointcloud_tgt, normals_src, normals_tgt, onet_samples=None):
         """
         Evaluates a mesh.
-        :param mesh: (o3d.geometry.TriangleMesh) mesh which should be evaluated
+        :param pointcloud_src: np (Nx3) reconstructed xyz
         :param pointcloud_tgt: np (Nx3) ground-truth xyz
+        :param normals_src: np (Nx3) reconstructed normals
         :param normals_tgt: np (Nx3) ground-truth normals
         :param onet_samples: (Nx3, N) onet samples and occupancy (latter is 1 inside, 0 outside)
         :return: metric-dict
@@ -89,23 +87,21 @@ class MeshEvaluator:
         if isinstance(normals_tgt, torch.Tensor):
             normals_tgt = normals_tgt.detach().cpu().numpy().astype(float)
 
-        # Triangle normal is used to be consistent with SAP.
-        try:
-            # Ensure same random seed for reproducibility
-            o3d.utility.random.seed(0)
-            sampled_pcd = mesh.sample_points_uniformly(
-                number_of_points=self.n_points, use_triangle_normal=True)
-            pointcloud = np.asarray(sampled_pcd.points)
-            normals = np.asarray(sampled_pcd.normals)
-        except RuntimeError:    # Sample error.
-            pointcloud = np.zeros((0, 3))
-            normals = np.zeros((0, 3))
+        if isinstance(normals_src, torch.Tensor):
+            normals_src = normals_src.detach().cpu().numpy().astype(float)
+        
+        if isinstance(pointcloud_src, torch.Tensor):
+            pointcloud_src = pointcloud_src.detach().cpu().numpy().astype(float)
+
+        # estimate normals if not given
+        if normals_src is None:
+            normals_src = pcu.estimate_point_cloud_normals_knn(pointcloud_src, 64)
 
         out_dict = self._evaluate(
-            pointcloud, pointcloud_tgt, normals, normals_tgt, onet_samples, mesh)
+            pointcloud_src, pointcloud_tgt, normals_src, normals_tgt, onet_samples)
 
         return out_dict
-
+    
     def _evaluate(self, pointcloud, pointcloud_tgt, normals=None, normals_tgt=None, onet_samples=None, mesh=None):
         """
         Evaluates a point cloud.
@@ -191,3 +187,59 @@ class MeshEvaluator:
         return {
             k: out_dict[k] for k in self.metric_names
         }
+
+
+class MeshEvaluator(PointCloudEvaluator):
+    """
+    Mesh evaluation class that handles the mesh evaluation process. Returned dict has meaning:
+        - completeness:             mean distance from all gt to pd.
+        - accuracy:                 mean distance from all pd to gt.
+        - chamfer-l1/l2:            average of the above two. [Chamfer distance]
+        - f-score(/-15/-20):        [F-score], computed at the threshold of 0.01, 0.015, 0.02.
+        - normals completeness:     mean normal alignment (0-1) from all gt to pd.
+        - normals accuracy:         mean normal alignment (0-1) from all pd to gt.
+        - normals:                  average of the above two, i.e., [Normal Consistency Score] (0-1)
+    Args:
+        n_points (int): number of points to be used for evaluation
+    """
+
+    def __init__(self, n_points=100000, metric_names=ALL_METRICS):
+        super().__init__()
+        self.n_points = n_points
+        self.thresholds = np.array([0.01, 0.015, 0.02, 0.002, 0.1])
+        self.fidx = [0, 1, 2, 3, 4]
+        self.metric_names = metric_names
+
+    def eval_mesh(self, mesh, pointcloud_tgt, normals_tgt, onet_samples=None):
+        """
+        Evaluates a mesh.
+        :param mesh: (o3d.geometry.TriangleMesh) mesh which should be evaluated
+        :param pointcloud_tgt: np (Nx3) ground-truth xyz
+        :param normals_tgt: np (Nx3) ground-truth normals
+        :param onet_samples: (Nx3, N) onet samples and occupancy (latter is 1 inside, 0 outside)
+        :return: metric-dict
+        """
+        if isinstance(pointcloud_tgt, torch.Tensor):
+            pointcloud_tgt = pointcloud_tgt.detach().cpu().numpy().astype(float)
+
+        if isinstance(normals_tgt, torch.Tensor):
+            normals_tgt = normals_tgt.detach().cpu().numpy().astype(float)
+
+        # Triangle normal is used to be consistent with SAP.
+        try:
+            # Ensure same random seed for reproducibility
+            o3d.utility.random.seed(0)
+            sampled_pcd = mesh.sample_points_uniformly(
+                number_of_points=self.n_points, use_triangle_normal=True)
+            pointcloud = np.asarray(sampled_pcd.points)
+            normals = np.asarray(sampled_pcd.normals)
+        except RuntimeError:    # Sample error.
+            pointcloud = np.zeros((0, 3))
+            normals = np.zeros((0, 3))
+
+        out_dict = self._evaluate(
+            pointcloud, pointcloud_tgt, normals, normals_tgt, onet_samples, mesh)
+
+        return out_dict
+
+    
