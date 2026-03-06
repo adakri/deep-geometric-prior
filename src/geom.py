@@ -66,8 +66,6 @@ def normals_curve_2d(x):
     n = n / torch.norm(n, dim=2).view(b, n_x, 1)
     return n
 
-import torch
-
 def gaussian_curvature_fundamental(phi, uv):
     """
     phi : function (N,2) -> (N,3)
@@ -130,3 +128,24 @@ def gaussian_curvature_det(phi, uv):
 
     K = (A * B - C**2) / denom
     return K
+
+def parametrization_hessian(phi, uv):
+    import torch
+    from torch.func import vmap, hessian
+    # (N,3,2,2)
+    H = vmap(hessian(phi))(uv)
+    return H
+
+def hessian_nuclear_norm(phi, uv):
+    import torch
+    from torch.func import vmap, hessian
+    H = vmap(hessian(phi))(uv)  # (N,3,2,2)
+    # flatten second derivative directions
+    Hmat = H.reshape(H.shape[0], 3, 4)
+    # singular values
+    # BUG: batch sdfvals
+    s = torch.linalg.svdvals(Hmat)
+    # nuclear norm
+    nuclear = s.sum(dim=1)
+    return nuclear.mean()
+

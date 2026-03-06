@@ -59,7 +59,7 @@ def load_point_cloud_by_file_extension(file_name, compute_normals=False):
 
     if compute_normals and f is not None:
         if f.shape[0] > 0:
-            n = pcu.per_vertex_normals(v, f)
+            n = pcu.estimate_mesh_vertex_normals(v, f)
     
     if compute_normals and f is None:
         # Estimate point cloud normals
@@ -432,7 +432,7 @@ def upsample_surface(patch_uvs, patch_tx, patch_models, devices, scale=1.0, num_
             
                 if compute_normals:
                     mesh_f = meshgrid_face_indices(n)
-                    mesh_n = pcu.per_vertex_normals(mesh_v, mesh_f)
+                    mesh_n = pcu.estimate_mesh_vertex_normals(mesh_v, mesh_f)
                     normals.append(mesh_n)
 
                 vertices.append(mesh_v)

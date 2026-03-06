@@ -1,6 +1,7 @@
 import argparse
 import copy
 import time
+import os 
 
 import torch
 import torch.nn as nn
@@ -12,6 +13,8 @@ import src.geom as geom
 from src.viz import plot_reconstruction, plot_correspondences, plot_uv
 from src.nns import MLP
 from fml.nn import SinkhornLoss, pairwise_distances
+from pytorch3d.loss import chamfer_distance
+from src.losses import anisotropy_loss, isometry_loss, isotropic_scaling_loss
 import ot
 
 
@@ -85,14 +88,13 @@ def main():
 
     optimizer = torch.optim.Adam(phi.parameters(), lr=args.learning_rate)
     uv_optimizer = torch.optim.Adam([uv], lr=args.learning_rate)
-    sinkhorn_loss = SinkhornLoss(
-        max_iters=args.max_sinkhorn_iters, return_transport_matrix=True
-    )
+    
+    # Losses
+    sinkhorn_loss = SinkhornLoss(max_iters=args.max_sinkhorn_iters, return_transport_matrix=True)
     mse_loss = nn.MSELoss()
 
     # Cache correspondences to plot them later
     pi = None
-
     # Cache model with the lowest loss if --use-best is passed
     best_model = None
     best_loss = np.inf
@@ -104,32 +106,52 @@ def main():
         epoch_start_time = time.time()
 
         y = phi(uv)
-        
-        # TODO: add losses from py3d
-        with torch.no_grad():
-            if args.loss == "exact_emd":
-                M = (
-                    pairwise_distances(x.unsqueeze(0), y.unsqueeze(0))
-                    .squeeze()
-                    .cpu()
-                    .squeeze()
-                    .numpy()
-                )
-                p = ot.emd(np.ones(x.shape[0]), np.ones(x.shape[0]), M)
-                p = torch.from_numpy(p.astype(np.float32)).to(args.device)
-            elif args.loss == "chamfer":
-                print()
-            elif args.loss == "hausdorff":
-                # https://github.com/Project-MONAI/MONAI/blob/dev/monai/metrics/hausdorff_distance.py
-                print()
-            else:
-                _, p = sinkhorn_loss(x.unsqueeze(0), y.unsqueeze(0))
-            pi = p.squeeze().max(0)[1]
+        #=============== Compute losses ===============#
+        loss = 0.0
+        loss_dict = {}
+        # OT losses
+        if args.loss in ["exact_emd", "sinkhorn"]:
+            with torch.no_grad():
+                if args.loss == "exact_emd":
+                    M = (
+                        pairwise_distances(x.unsqueeze(0), y.unsqueeze(0))
+                        .squeeze()
+                        .cpu()
+                        .squeeze()
+                        .numpy()
+                    )
+                    p = ot.emd(np.ones(x.shape[0]), np.ones(x.shape[0]), M)
+                    p = torch.from_numpy(p.astype(np.float32)).to(args.device)
+                if args.loss == "sinkhorn":
+                    _, p = sinkhorn_loss(x.unsqueeze(0), y.unsqueeze(0))
+                    
+                # Correspondences for plotting
+                pi = p.squeeze().max(0)[1]
+            
+            loss += mse_loss(x[pi].unsqueeze(0), y.unsqueeze(0))
+            loss_dict[args.loss] = loss.item()
 
-        loss = mse_loss(x[pi].unsqueeze(0), y.unsqueeze(0))
+        # NN losses
+        if args.loss == "chamfer":
+            loss_chamfer, _ = chamfer_distance(x.unsqueeze(0), y.unsqueeze(0))
+            loss += loss_chamfer
+            loss_dict["chamfer"] = loss_chamfer.item()
+        if args.loss == "hausdorff":
+            # https://github.com/Project-MONAI/MONAI/blob/dev/monai/metrics/hausdorff_distance.py
+            print()
         
-        # Add regularization
-        # TODO
+        # Regularisations
+        from torch.func import vmap, jacrev
+        J = vmap(jacrev(phi))(uv)  # (N,3,2)
+        
+             
+        if(False):
+             loss_reg = isotropic_scaling_loss(J)
+             loss += loss_reg
+             loss_dict["reg"] = 0.5 *loss_reg.item()
+
+
+        #=============== END ===============#
 
         loss.backward()
 
@@ -140,12 +162,14 @@ def main():
         epoch_end_time = time.time()
 
         if epoch % args.print_every == 0:
+            loss_str = " ".join([f"{k}={v:0.5f}" for k, v in loss_dict.items()])
             print(
-                "%d/%d: [Loss = %0.5f] [Time = %0.3f]"
+                "%d/%d: [Loss = %0.5f] [%s] [Time = %0.3f]"
                 % (
                     epoch,
                     args.local_epochs,
                     loss.item(),
+                    loss_str,
                     epoch_end_time - epoch_start_time,
                 )
             )
@@ -163,11 +187,23 @@ def main():
     if args.plot:
         #plot_uv(uv.detach().cpu().numpy())
         plot_reconstruction(uv=uv, x=x, transform=transform, model=phi, pad=1.0, n=128)
-        plot_correspondences(model=phi, uv=uv, x=x, pi=pi)
-        
+        if(pi is not None):
+            plot_correspondences(model=phi, uv=uv, x=x, pi=pi)
+            
+    #================== Reconstruct dense point cloud and surface===============#
+    print("Generating upsamples...")
+    v, n = utils.upsample_surface([uv], [transform], [phi], ['cpu'],
+                                  num_samples=500,
+                                  compute_normals=True)
+    print("Saving upsampled cloud...")
+    pcu.save_mesh_vn(os.path.join(os.path.dirname(args.output), "upsampled.ply"), v, n)
+    #===========   evaluate distances ===============#
+    # TODO
+
+    #=============== Bonus: Plot Gaussian curvature ===============#
     # Evaluate Gaussian curvature
-    plot_reconstruction(uv=uv, x=None, transform=None, model=phi, pad=1.0, scalar_field_func=geom.gaussian_curvature_fundamental)
-    plot_reconstruction(uv=uv, x=None, transform=None, model=phi, pad=1.0, scalar_field_func=geom.gaussian_curvature_det)
+    #plot_reconstruction(uv=uv, x=None, transform=None, model=phi, pad=1.0, scalar_field_func=geom.gaussian_curvature_fundamental)
+    #plot_reconstruction(uv=uv, x=None, transform=None, model=phi, pad=1.0, scalar_field_func=geom.gaussian_curvature_det)
 
 if __name__ == "__main__":
     main()
